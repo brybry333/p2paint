@@ -64,7 +64,28 @@ static IMaterial *s_pRingMaterial;
 static Vector s_vecCamera;
 static bool s_bHaveCamera;
 
-static ConVar p2paint_lastdir( "p2paint_lastdir", "", FCVAR_ARCHIVE, "p2paint: the folder ADD A FILE opened last" );
+// the folder ADD A FILE opened last: a file of ours, not an archived cvar (bhoptools loads us after config.cfg ran)
+static std::string LastDirFile();
+static std::string LastDir()
+{
+	char buf[1024] = "";
+	if ( FILE *f = fopen( LastDirFile().c_str(), "r" ) )
+	{
+		if ( !fgets( buf, sizeof( buf ), f ) )
+			buf[0] = 0;
+		fclose( f );
+	}
+	buf[strcspn( buf, "\r\n" )] = 0;
+	return buf;
+}
+static void SetLastDir( const std::string &dir )
+{
+	if ( FILE *f = fopen( LastDirFile().c_str(), "w" ) )
+	{
+		fprintf( f, "%s\n", dir.c_str() );
+		fclose( f );
+	}
+}
 
 //-----------------------------------------------------------------------------
 // What the server told us (p2paint_ui_state)
@@ -147,6 +168,12 @@ static void MarkServerAware()
 	s_AwareOf = c;
 }
 bool P2UI_ServerAware() { return !s_AwareOf.empty() && s_AwareOf == Connection(); }
+bool P2Paint_Enabled();		// p2paint_runtime.cpp (bhoptools' switch)
+void P2UI_ForgetServer()
+{
+	s_AwareOf.clear();
+	SetMenuOpen( false );
+}
 static bool ServerAware()
 {
 	IVEngineClient *e = P2Paint_Engine();
@@ -155,6 +182,8 @@ static bool ServerAware()
 
 CON_COMMAND_F( p2paint_ui_state, "p2paint (from the server): paint settings as key value pairs", FCVAR_SERVER_CAN_EXECUTE )
 {
+	if ( !P2Paint_Enabled() )
+		return;		// switched off in bhoptools: the server's own paint
 	P2Paint_EnsureReady();
 	MarkServerAware();
 	for ( int i = 1; i + 1 < args.ArgC(); i += 2 )
@@ -208,7 +237,9 @@ CON_COMMAND_F( p2paint_ui_list, "p2paint (from the server): a list for the paint
 
 CON_COMMAND( p2paint_menu, "p2paint: open the paint menu (greyed out on servers without the paint plugin)" )
 {
-	if ( ServerAware() )
+	if ( !P2Paint_Enabled() )
+		Send( "sm_paint" );			// switched off in bhoptools: the server's own paint menu
+	else if ( ServerAware() )
 		Send( "sm_paintmenu" );		// the plugin sends the current settings and opens it
 	else if ( P2Paint_EnsureUI() )
 		SetMenuOpen( true );
@@ -580,6 +611,7 @@ static int PictureTexture( const std::string &name )
 }
 
 static std::string HomeDir() { return P2Plat_Home(); }
+static std::string LastDirFile() { return P2Plat_CacheDir() + "/lastdir.txt"; }
 static bool IsDir( const std::string &path ) { return P2Plat_IsDir( path ); }
 
 // the folder above (stops at the root: "/" or a drive "C:/")
@@ -1251,7 +1283,7 @@ private:
 	// ---- the file picker ------------------------------------------------------------------------------
 	void OpenFiles()
 	{
-		std::string dir = p2paint_lastdir.GetString();
+		std::string dir = LastDir();
 		if ( dir.empty() || !IsDir( dir ) )
 			dir = IsDir( HomeDir() + "/Pictures" ) ? HomeDir() + "/Pictures" : HomeDir();
 		GoTo( dir );
@@ -1266,7 +1298,7 @@ private:
 		m_Dir = dir;
 		m_Entries.swap( entries );
 		m_nFileScroll = 0;
-		p2paint_lastdir.SetValue( m_Dir.c_str() );
+		SetLastDir( m_Dir );
 	}
 
 	void FilesView( int x, int y, int w, int h )

@@ -60,6 +60,16 @@ wininject.exe "C:\...\Counter-Strike Source\cstrike_win64.exe" "C:\...\p2paint.d
 For IMAGES > ADD A FILE put `maretf.exe` (MareTF's Windows release) next to `p2paint.dll`. Tested under Proton so
 far, not on Windows itself.
 
+## Loading it from another mod
+
+- Linux: `dlopen` the library built here (`build/game_shader_generic_p2paint.so`, any name) and call `P2Paint_Start()`
+  on the game's main thread once `client.so` is loaded. It returns 0 if another copy already runs.
+- Windows: `LoadLibrary` `p2paint.dll`; it starts itself.
+- `p2paint_enable(bool)`: on / off (off = the server sees no mod from the next join and gives its classic paint).
+  Safe to call before it has started.
+- `p2paint_server()`: 1 = this server runs the paint plugin, 0 = it doesn't, -1 = can't tell.
+- Linux release builds: `make check-glibc` (the library runs on glibc 2.31, the Steam runtime).
+
 ## Engine patches
 
 At load the mod patches two spots of `engine.so` / `engine.dll` in memory, nothing on disk: the decal pool goes from 2048 to

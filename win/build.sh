@@ -4,8 +4,9 @@
 # Linux build (p2paint_platform_win.cpp instead of _linux), plus the SDK's tier1 / mathlib compiled here (the SDK
 # ships no Windows build of them). Loaded by anything that LoadLibrary's it: the bhoptools fork, tools/wininject.exe.
 # Needs clang, lld, mingw-w64-gcc (wininject), an xwin splat in ~/.local/share/xwin (or XWIN=) and the SDK in
-# third_party/. win/sdk-compat = two SDK headers patched for clang-cl. Run it from a path without spaces (a symlink
-# to this folder is fine): the compiler flags break on them.
+# third_party/. win/sdk-compat = two SDK headers patched for clang-cl. RTTI stays on (-GR): the engine
+# dynamic_casts our ConVars (without it, typing p2paint_version or a server's query of it crashed the game).
+# Run it from a path without spaces (a symlink to this folder is fine): the compiler flags break on them.
 set -euo pipefail
 C=$(cd "$(dirname "$0")/.." && pwd -L)
 W=$C/win
@@ -16,7 +17,7 @@ mkdir -p "$OUT" "$B/obj/tier1" "$B/obj/mathlib" "$B/obj/p2paint" "$B/gen"
 SDK=$C/third_party/source-sdk-2013/src
 MSVC="--target=x86_64-pc-windows-msvc -nologo -imsvc $X/crt/include -imsvc $X/sdk/include/ucrt -imsvc $X/sdk/include/um -imsvc $X/sdk/include/shared"
 LIBS="-libpath:$X/crt/lib/x86_64 -libpath:$X/sdk/lib/um/x86_64 -libpath:$X/sdk/lib/ucrt/x86_64 -libpath:$SDK/lib/public/x64"
-CF="$MSVC /clang:-ffile-prefix-map=$C=. -O2 -MT -EHs-c- -D_HAS_EXCEPTIONS=0 -GR- -Wno-everything -D_WIN32 -DWIN32 -D_WINDOWS \
+CF="$MSVC /clang:-ffile-prefix-map=$C=. -O2 -MT -EHs-c- -D_HAS_EXCEPTIONS=0 -GR -Wno-everything -D_WIN32 -DWIN32 -D_WINDOWS \
     -D_WIN64 -DCOMPILER_MSVC -DCOMPILER_MSVC64 -DPLATFORM_64BITS -D_CRT_SECURE_NO_WARNINGS -DNOMINMAX -DNDEBUG -DSOURCESDK \
     -I$W/sdk-compat -I$SDK/public -I$SDK/public/tier0 -I$SDK/public/tier1 -I$SDK/common \
     -FI$W/sdk-compat/tier1/bitbuf.h -FI$W/sdk-compat/mathlib/ssemath.h"

@@ -69,8 +69,13 @@ $(BUILD)/dll/memoverride.o: $(SDK)/public/tier0/memoverride.cpp
 $(OUT): $(DLL_OBJ) $(BUILD)/tier1.a $(BUILD)/mathlib.a
 	$(CXX) -shared -o $@ $(DLL_OBJ) -static-libgcc -Wl,--build-id -Wl,-z,noexecstack \
 	    -Wl,--start-group $(LIBPUB)/shaderlib.a $(LIBPUB)/tier2.a $(BUILD)/mathlib.a $(BUILD)/tier1.a -Wl,--end-group \
-	    -L$(LIBPUB) -ltier0 -lvstdlib -lm -ldl -lpthread -Wl,--no-undefined \
+	    -L$(LIBPUB) -ltier0 -lvstdlib -Wl,--no-as-needed -l:libdl.so.2 -l:libpthread.so.0 -lm -Wl,--no-undefined \
 	    -Wl,--version-script=$(SDK)/devtools/version_script.linux.txt
+
+# loadable on the Steam runtime's glibc 2.31 (src/p2paint_glibc_compat.cpp): bhoptools ships it to other PCs
+check-glibc: $(OUT)
+	@v=$$(objdump -T $(OUT) | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1); echo "$(OUT) needs $$v"; \
+	case "$$v" in GLIBC_2.[0-9]|GLIBC_2.[0-9].*|GLIBC_2.[12][0-9]|GLIBC_2.[12][0-9].*|GLIBC_2.3[01]) ;; *) echo "too new for glibc 2.31"; exit 1;; esac
 
 # ---- the LD_PRELOAD loader (CS:S refuses mod shader libraries; see src/loader/p2paint_loader.c) -----
 LOADER   := $(BUILD)/libp2paint.so
@@ -94,5 +99,5 @@ patchtest: $(PATCHTEST)
 all: $(OUT) $(LOADER)
 clean:
 	rm -rf $(BUILD)
-.PHONY: all clean surftest patchtest
+.PHONY: all clean surftest patchtest check-glibc
 .DEFAULT_GOAL := all

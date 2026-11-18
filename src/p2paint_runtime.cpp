@@ -296,6 +296,17 @@ static void DrawOwnDecals( IMatRenderContext *ctx, const Vector &camera )
 //-----------------------------------------------------------------------------
 // The paint layer: a renderable so we draw in the world (the aim ghost) and know the camera
 //-----------------------------------------------------------------------------
+#ifdef _WIN32
+// CDefaultClientRenderable's own vtable (emitted on Windows with RTTI on) names this client.dll function; ours
+// overrides GetRenderBoundsWorldspace, so this only has to link (it does what the original does)
+void DefaultRenderBoundsWorldspace( IClientRenderable *pRenderable, Vector &absMins, Vector &absMaxs )
+{
+	Vector mins, maxs;
+	pRenderable->GetRenderBounds( mins, maxs );
+	TransformAABB( pRenderable->RenderableToWorldTransform(), mins, maxs, absMins, absMaxs );
+}
+#endif
+
 class CP2PaintLayer : public CDefaultClientRenderable
 {
 public:
@@ -403,7 +414,37 @@ static CP2PaintLayer s_Layer;
 //-----------------------------------------------------------------------------
 // the server plugin checks this (QueryClientConVar): 10+ = it sends p2paint_decal and our menu;
 // 11: also paint on props, displacements, brush entities, clips, triggers, invisible walls
-static ConVar p2paint_version( "p2paint_version", "11", FCVAR_DONTRECORD, "p2paint client mod version" );
+#define P2PAINT_VERSION "11"
+static ConVar p2paint_version( "p2paint_version", P2PAINT_VERSION, FCVAR_DONTRECORD, "p2paint client mod version" );
+
+// bhoptools' settings switch. Off: the server sees no mod from its next look at p2paint_version (the next join / map)
+// and gives classic paint and its own menu; our paint and the plugin's hello go away at once.
+static bool s_bEnabled = true;
+bool P2Paint_Enabled() { return s_bEnabled; }
+void P2UI_ForgetServer();	// p2paint_ui.cpp
+P2_EXPORT void p2paint_enable( bool on )
+{
+	s_bEnabled = on;
+	// (bhoptools on Windows calls this right after LoadLibrary, before our commands exist: P2Paint_Init applies it)
+	if ( p2paint_version.IsRegistered() )
+		p2paint_version.SetValue( on ? P2PAINT_VERSION : "0" );
+	if ( on )
+		return;
+	for ( const Decal_t &d : s_Decals )
+		if ( d.engine )
+			Unshoot( d.tag );
+	s_Decals.clear();
+	P2UI_ForgetServer();
+}
+
+// bhoptools' Options row: 1 = this server runs our paint plugin, 0 = it doesn't (the row greys out), -1 = can't tell
+// (switched off: the plugin never says hello then; or not in a game)
+P2_EXPORT int p2paint_server()
+{
+	if ( !s_bEnabled || !s_pEngine || !s_pEngine->IsInGame() )
+		return -1;
+	return P2UI_ServerAware() ? 1 : 0;
+}
 
 CON_COMMAND_F( p2paint_decal, "p2paint_decal x y z size(0-7) r g b [picture [nx ny nz surface]]: one paint splat", FCVAR_SERVER_CAN_EXECUTE )
 {
@@ -580,6 +621,8 @@ P2_EXPORT int P2Paint_Init()
 		s_bFiles = true;
 		WriteGameFiles();
 	}
+	if ( !s_bEnabled && p2paint_version.IsRegistered() )
+		p2paint_version.SetValue( "0" );	// switched off before we were up (p2paint_enable)
 	return 1;
 }
 
@@ -589,21 +632,28 @@ P2_EXPORT const char *P2Paint_EngineLog()
 	return s_EngineLog.c_str();
 }
 
-#ifdef _WIN32
-// Windows: on the game's main thread once its window is up (p2paint_platform_win.cpp): our console commands
-// (tier1, through vstdlib's ICvar; Linux gets them from shaderlib), then the rest like Linux
-void P2Paint_MainInit()
+// Started by anything but the shader system, on the main thread: bhoptools on Linux (dlopen + this), our own DLL
+// start on Windows (p2paint_platform_win.cpp). Our console commands through vstdlib's ICvar (the shader-library way
+// gets them from shaderlib), then P2Paint_Init. 0 = not started: another copy of us already runs (e.g. the
+// libp2paint.so preload and bhoptools both loaded one), or the game's interfaces are missing.
+P2_EXPORT int P2Paint_Start()
 {
 	CreateInterfaceFn factory = (CreateInterfaceFn)P2Plat_Factory( "vstdlib" );
-	if ( factory )
+	if ( !factory )
+		return 0;
+	ConnectTier1Libraries( &factory, 1 );
+	if ( !g_pCVar )
+		return 0;
+	if ( g_pCVar->FindCommandBase( "p2paint_version" ) )
 	{
-		ConnectTier1Libraries( &factory, 1 );
-		ConVar_Register( 0 );
+		Warning( "p2paint: another copy is already loaded, this one stays off\n" );
+		return 0;
 	}
+	ConVar_Register( 0 );
 	if ( !P2Paint_Init() )
 	{
 		Warning( "p2paint: game interfaces missing\n" );
-		return;
+		return 0;
 	}
 	Msg( "p2paint: ready, engine code: %s", s_EngineLog.c_str() );
 	// tests: a +p2paint_selftest on the command line runs before an injected DLL is in, so it comes this way
@@ -613,5 +663,9 @@ void P2Paint_MainInit()
 		V_snprintf( cmd, sizeof( cmd ), "p2paint_selftest \"%s\"\n", script );
 		s_pEngine->ClientCmd_Unrestricted( cmd );
 	}
+	return 1;
 }
+
+#ifdef _WIN32
+void P2Paint_MainInit() { P2Paint_Start(); }
 #endif
