@@ -667,9 +667,15 @@ public Action Timer_LoadPaint(Handle timer, any userid)
     if (client <= 0 || !IsClientInGame(client))
         return Plugin_Stop;
     char auth[64], map[64];
-    if (!PaintOwner(client, auth, map) || (!g_bModKnown[client] && g_iLoadWaited[client] < 10))
+    bool owner = PaintOwner(client, auth, map);
+    if (!owner || (!g_bModKnown[client] && g_iLoadWaited[client] < 10))
     {
         g_iLoadWaited[client]++;
+        if (!owner && g_iLoadWaited[client] == 20)
+        {
+            LogMessage("%L: Steam hasn't confirmed this player after 10 s: their paint waits", client);
+            PrintToChat(client, "[Paint] Waiting for Steam to confirm your Steam ID: your paint loads (and saves) after that.");
+        }
         CreateTimer(0.5, Timer_LoadPaint, userid, TIMER_FLAG_NO_MAPCHANGE);
         return Plugin_Stop;
     }

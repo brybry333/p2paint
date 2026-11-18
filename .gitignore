@@ -4,3 +4,4 @@ __pycache__/
 build/
 install/
 compile_flags.txt
+win/build/

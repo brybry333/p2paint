@@ -10,7 +10,8 @@
 //                                              verified against CS:S client.so 2026-10-26
 //   materialsystem.so  VMaterialSystem082      materials, render context
 //   filesystem_stdio   VBaseFileSystem011      the map and prop models from VPKs / the map's pak
-// Console commands are registered by shaderlib (CShaderDLL::Connect -> ConVar_Register).
+// Console commands: Linux = shaderlib (the loader loads us as a shader library: CShaderDLL::Connect ->
+// ConVar_Register); Windows = P2Paint_MainInit (p2paint_platform_win.cpp starts us).
 //
 // Why PlayerDecalShoot (the spray call) and not DecalShoot: it takes any material, so a colour needs no
 // precached decal per colour and pictures need no server precache at all (the engine's decal name table has
@@ -22,8 +23,8 @@
 // invisible walls are cut out of the map's own triangles and drawn by the paint layer, same material
 // (p2paint_surfaces.cpp); the plugin says what each splat landed on (older saved paint: we look it up).
 //=============================================================================
-#include <dlfcn.h>
-#include <link.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <map>
@@ -32,6 +33,7 @@
 
 #include "tier1/convar.h"
 #include "tier1/interface.h"
+#include "tier1/tier1.h"
 #include "tier1/strtools.h"
 #include "cdll_int.h"
 #include "iclientrenderable.h"
@@ -50,6 +52,8 @@
 #include "p2paint_pics.h"
 #include "p2paint_surfaces.h"
 #include "p2paint_enginepatch.h"
+#include "p2paint_platform.h"
+#include "p2paint_files.h"		// game/ embedded by tools/embed.py (build/gen)
 
 #include "tier0/memdbgon.h"
 
@@ -77,43 +81,18 @@ static IVModelInfoClient *s_pModelInfo;
 static IBaseFileSystem *s_pFileSystem;
 
 //-----------------------------------------------------------------------------
-// Interfaces from already-loaded game modules
+// Interfaces from already-loaded game modules (p2paint_platform_*.cpp)
 //-----------------------------------------------------------------------------
-struct FindModule_t { const char *suffix; char path[1024]; bool found; };
-
-static int FindModuleCB( struct dl_phdr_info *info, size_t, void *data )
-{
-	FindModule_t *m = (FindModule_t *)data;
-	size_t n = strlen( info->dlpi_name ), s = strlen( m->suffix );
-	if ( n < s || strcmp( info->dlpi_name + n - s, m->suffix ) )
-		return 0;
-	V_strncpy( m->path, info->dlpi_name, sizeof( m->path ) );
-	m->found = true;
-	return 1;
-}
-
-static void *GameInterface( const char *moduleSuffix, const char *name )
-{
-	FindModule_t m = { moduleSuffix, "", false };
-	dl_iterate_phdr( FindModuleCB, &m );
-	if ( !m.found )
-		return NULL;
-	void *h = dlopen( m.path, RTLD_NOW | RTLD_NOLOAD );
-	if ( !h )
-		return NULL;
-	CreateInterfaceFn fn = (CreateInterfaceFn)dlsym( h, "CreateInterface" );
-	dlclose( h );	// NOLOAD handle; the module stays loaded
-	return fn ? fn( name, NULL ) : NULL;
-}
+static void *GameInterface( const char *module, const char *name ) { return P2Plat_Interface( module, name ); }
 
 static bool ConnectInterfaces()
 {
-	if ( !s_pEngine )		s_pEngine = (IVEngineClient *)GameInterface( "/bin/linux64/engine.so", "VEngineClient014" );
-	if ( !s_pLeafSystem )	s_pLeafSystem = (IP2LeafSystem *)GameInterface( "/cstrike/bin/linux64/client.so", "ClientLeafSystem002" );
-	if ( !s_pMatSys )		s_pMatSys = (IMaterialSystem *)GameInterface( "/bin/linux64/materialsystem.so", "VMaterialSystem082" );
-	if ( !s_pEffects )		s_pEffects = (IVEfx *)GameInterface( "/bin/linux64/engine.so", VENGINE_EFFECTS_INTERFACE_VERSION );
-	if ( !s_pModelInfo )	s_pModelInfo = (IVModelInfoClient *)GameInterface( "/bin/linux64/engine.so", VMODELINFO_CLIENT_INTERFACE_VERSION );
-	if ( !s_pFileSystem )	s_pFileSystem = (IBaseFileSystem *)GameInterface( "/bin/linux64/filesystem_stdio.so", "VBaseFileSystem011" );
+	if ( !s_pEngine )		s_pEngine = (IVEngineClient *)GameInterface( "engine", "VEngineClient014" );
+	if ( !s_pLeafSystem )	s_pLeafSystem = (IP2LeafSystem *)GameInterface( "client", "ClientLeafSystem002" );
+	if ( !s_pMatSys )		s_pMatSys = (IMaterialSystem *)GameInterface( "materialsystem", "VMaterialSystem082" );
+	if ( !s_pEffects )		s_pEffects = (IVEfx *)GameInterface( "engine", VENGINE_EFFECTS_INTERFACE_VERSION );
+	if ( !s_pModelInfo )	s_pModelInfo = (IVModelInfoClient *)GameInterface( "engine", VMODELINFO_CLIENT_INTERFACE_VERSION );
+	if ( !s_pFileSystem )	s_pFileSystem = (IBaseFileSystem *)GameInterface( "filesystem_stdio", "VBaseFileSystem011" );
 	return s_pEngine && s_pLeafSystem && s_pMatSys && s_pEffects && s_pModelInfo;
 }
 
@@ -536,26 +515,103 @@ bool P2Paint_EnsureUI()
 	return s_bUI;
 }
 
-// shaderlib's CShaderDLL is how the game takes us in: the ShaderDLL004 interface the material system loads us by,
-// and its Connect registers our console commands (ConVar_Register). No shader references it any more, so this
-// keeps it (and tier1's CreateInterface) in the build.
+// Our materials and menu font (game/, embedded) into the game folder, rewritten only when they differ: no install
+// step, and cstrike/custom/ folders are only mounted at startup.
+static void WriteGameFiles()
+{
+	std::string dir = s_pEngine->GetGameDirectory();
+	for ( const P2GameFile_t &f : s_GameFiles )
+	{
+		std::string path = dir + "/" + f.path;
+		if ( P2Plat_FileSize( path ) == (long long)f.size )
+		{
+			CUtlVector<unsigned char> old;
+			old.SetCount( f.size );
+			FILE *in = fopen( path.c_str(), "rb" );
+			bool same = in && fread( old.Base(), 1, f.size, in ) == f.size && !memcmp( old.Base(), f.data, f.size );
+			if ( in )
+				fclose( in );
+			if ( same )
+				continue;
+		}
+		P2Plat_MakeDirs( path.substr( 0, path.rfind( '/' ) ) );
+		std::string tmp = path + ".tmp";
+		FILE *out = fopen( tmp.c_str(), "wb" );
+		bool ok = out && fwrite( f.data, 1, f.size, out ) == f.size;
+		if ( out )
+			ok = fclose( out ) == 0 && ok;
+		if ( !ok || !P2Plat_Replace( tmp, path ) )
+		{
+			remove( tmp.c_str() );
+			Warning( "p2paint: can't write %s\n", path.c_str() );
+		}
+	}
+}
+
+#ifndef _WIN32
+// shaderlib's CShaderDLL is how the game takes us in on Linux: the ShaderDLL004 interface the material system loads
+// us by, and its Connect registers our console commands (ConVar_Register). No shader references it any more, so
+// this keeps it (and tier1's CreateInterface) in the build.
 class IShaderDLL;
 IShaderDLL *GetShaderDLL();
-extern "C" __attribute__( ( visibility( "default" ), used ) ) void *P2Paint_ShaderDLL() { return GetShaderDLL(); }
+P2_EXPORT void *P2Paint_ShaderDLL() { return GetShaderDLL(); }
+#endif
 
 static std::string s_EngineLog;
 
-// Called by the loader (libp2paint.so) right after the shader system loaded us: before the first map, so the
-// decal pool (sized at each map load) and the paint sizes already get the engine patches.
-extern "C" __attribute__( ( visibility( "default" ) ) ) int P2Paint_Init()
+// the engine code patches (p2paint_enginepatch.cpp), once: Linux = from P2Paint_Init, Windows = as soon as
+// engine.dll is in (p2paint_platform_win.cpp), both before the first map sizes the decal pool
+void P2Paint_PatchEngine()
 {
 	if ( s_EngineLog.empty() )
 		s_EngineLog = P2Patch_Engine();
-	return ConnectInterfaces() ? 1 : 0;
+}
+
+// Linux: called by the loader (libp2paint.so) right after the shader system loaded us. Windows: P2Paint_MainInit.
+// Both on the main thread, before the first map.
+P2_EXPORT int P2Paint_Init()
+{
+	P2Paint_PatchEngine();
+	if ( !ConnectInterfaces() )
+		return 0;
+	static bool s_bFiles;
+	if ( !s_bFiles )
+	{
+		s_bFiles = true;
+		WriteGameFiles();
+	}
+	return 1;
 }
 
 // what P2Paint_Init did to the engine code, for the loader's log (the console doesn't exist yet at that point)
-extern "C" __attribute__( ( visibility( "default" ) ) ) const char *P2Paint_EngineLog()
+P2_EXPORT const char *P2Paint_EngineLog()
 {
 	return s_EngineLog.c_str();
 }
+
+#ifdef _WIN32
+// Windows: on the game's main thread once its window is up (p2paint_platform_win.cpp): our console commands
+// (tier1, through vstdlib's ICvar; Linux gets them from shaderlib), then the rest like Linux
+void P2Paint_MainInit()
+{
+	CreateInterfaceFn factory = (CreateInterfaceFn)P2Plat_Factory( "vstdlib" );
+	if ( factory )
+	{
+		ConnectTier1Libraries( &factory, 1 );
+		ConVar_Register( 0 );
+	}
+	if ( !P2Paint_Init() )
+	{
+		Warning( "p2paint: game interfaces missing\n" );
+		return;
+	}
+	Msg( "p2paint: ready, engine code: %s", s_EngineLog.c_str() );
+	// tests: a +p2paint_selftest on the command line runs before an injected DLL is in, so it comes this way
+	if ( const char *script = getenv( "P2PAINT_SELFTEST" ) )
+	{
+		char cmd[1024];
+		V_snprintf( cmd, sizeof( cmd ), "p2paint_selftest \"%s\"\n", script );
+		s_pEngine->ClientCmd_Unrestricted( cmd );
+	}
+}
+#endif

@@ -10,29 +10,20 @@
 // Size caps: the longer side is at most 1024 px (more never shows on a decal), the file at most 16 MiB - 1 like
 // sprays (animations get smaller, then lose frames, to fit), and the engine's VTF rule
 // floor(log2 w) + floor(log2 h) + floor(log2 frames) <= 25 (it refuses anything bigger).
-// The game runs in Steam's runtime container: the host's /usr is at /run/host/usr there.
+// MareTF: the host's on Linux (the game runs in Steam's runtime container), maretf.exe next to us on Windows.
 //=============================================================================
 #include "p2paint_pics.h"
 
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <math.h>
-#include <pthread.h>
-#include <spawn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <mutex>
 
-extern char **environ;
+#include "p2paint_platform.h"
 
 const float P2_DECAL_SCALE[8] = { 0.20f, 0.28f, 0.40f, 0.60f, 0.90f, 1.30f, 1.80f, 2.40f };
 
@@ -76,9 +67,9 @@ static bool WriteFileAtomic( const std::string &path, const void *data, size_t s
 		return false;
 	bool ok = fwrite( data, 1, size, f ) == size;
 	ok = fclose( f ) == 0 && ok;
-	if ( !ok || rename( tmp.c_str(), path.c_str() ) != 0 )
+	if ( !ok || !P2Plat_Replace( tmp, path ) )
 	{
-		unlink( tmp.c_str() );
+		remove( tmp.c_str() );
 		return false;
 	}
 	return true;
@@ -89,24 +80,9 @@ static bool WriteText( const std::string &path, const std::string &text )
 	return WriteFileAtomic( path, text.data(), text.size() );
 }
 
-static bool Exists( const std::string &path )
-{
-	struct stat st;
-	return stat( path.c_str(), &st ) == 0;
-}
-
-static long long FileSize( const std::string &path )
-{
-	struct stat st;
-	return stat( path.c_str(), &st ) == 0 ? (long long)st.st_size : -1;
-}
-
-static void MakeDirs( const std::string &path )
-{
-	for ( size_t i = 1; i <= path.size(); i++ )
-		if ( i == path.size() || path[i] == '/' )
-			mkdir( path.substr( 0, i ).c_str(), 0755 );
-}
+static bool Exists( const std::string &path ) { return P2Plat_FileSize( path ) >= 0; }
+static long long FileSize( const std::string &path ) { return P2Plat_FileSize( path ); }
+static void MakeDirs( const std::string &path ) { P2Plat_MakeDirs( path ); }
 
 static std::string BaseName( const std::string &path )
 {
@@ -370,53 +346,12 @@ static ImageInfo ProbeImage( const std::vector<uint8_t> &d )
 //-----------------------------------------------------------------------------
 // MareTF
 //-----------------------------------------------------------------------------
-static std::string FindMareTF()
-{
-	static const char *const paths[] = { "/run/host/usr/sbin/maretf", "/run/host/usr/bin/maretf", "/run/host/usr/local/bin/maretf",
-		"/usr/sbin/maretf", "/usr/bin/maretf", "/usr/local/bin/maretf" };
-	for ( const char *p : paths )
-		if ( access( p, X_OK ) == 0 )
-			return p;
-	if ( const char *home = getenv( "HOME" ) )
-	{
-		std::string p = std::string( home ) + "/.local/bin/maretf";
-		if ( access( p.c_str(), X_OK ) == 0 )
-			return p;
-	}
-	return "";
-}
+static std::string FindMareTF() { return P2Plat_FindMareTF(); }
 
-// runs MareTF with the game's environment minus its preloads; its output goes to log (for errors)
 static bool RunMareTF( const std::vector<std::string> &args, const std::string &log )
 {
 	std::string exe = FindMareTF();
-	if ( exe.empty() )
-		return false;
-	std::vector<char *> argv;
-	argv.push_back( (char *)exe.c_str() );
-	for ( const std::string &a : args )
-		argv.push_back( (char *)a.c_str() );
-	argv.push_back( NULL );
-	std::vector<char *> envp;
-	for ( char **e = environ; *e; e++ )
-		if ( strncmp( *e, "LD_PRELOAD=", 11 ) )
-			envp.push_back( *e );
-	envp.push_back( NULL );
-
-	posix_spawn_file_actions_t fa;
-	posix_spawn_file_actions_init( &fa );
-	posix_spawn_file_actions_addopen( &fa, 0, "/dev/null", O_RDONLY, 0 );
-	posix_spawn_file_actions_addopen( &fa, 1, log.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644 );
-	posix_spawn_file_actions_adddup2( &fa, 1, 2 );
-	pid_t pid;
-	int rc = posix_spawn( &pid, exe.c_str(), &fa, NULL, argv.data(), envp.data() );
-	posix_spawn_file_actions_destroy( &fa );
-	if ( rc != 0 )
-		return false;
-	int status = 0;
-	while ( waitpid( pid, &status, 0 ) < 0 && errno == EINTR )
-		;
-	return WIFEXITED( status ) && WEXITSTATUS( status ) == 0;
+	return !exe.empty() && P2Plat_Run( exe, args, log );
 }
 
 //-----------------------------------------------------------------------------
@@ -505,11 +440,12 @@ static bool ByName( const P2Picture &a, const P2Picture &b ) { return a.name < b
 void P2Pics_Refresh()
 {
 	std::vector<P2Picture> pics, sprays;
-	if ( DIR *dir = opendir( s_PicDir.c_str() ) )
+	std::vector<P2PlatEntry> entries;
+	if ( P2Plat_ListDir( s_PicDir, entries ) )
 	{
-		while ( dirent *e = readdir( dir ) )
+		for ( const P2PlatEntry &e : entries )
 		{
-			std::string f = e->d_name;
+			std::string f = e.name;
 			if ( f.size() < 5 || Lower( f.substr( f.size() - 4 ) ) != ".vtf" )
 				continue;
 			P2Picture p;
@@ -525,13 +461,12 @@ void P2Pics_Refresh()
 			p.frames = v.frames;
 			pics.push_back( p );
 		}
-		closedir( dir );
 	}
-	if ( DIR *dir = opendir( s_LogoDir.c_str() ) )
+	if ( P2Plat_ListDir( s_LogoDir, entries ) )
 	{
-		while ( dirent *e = readdir( dir ) )
+		for ( const P2PlatEntry &e : entries )
 		{
-			std::string f = e->d_name, stem = Stem( f );
+			std::string f = e.name, stem = Stem( f );
 			if ( f.size() < 5 || Lower( f.substr( f.size() - 4 ) ) != ".vtf" )
 				continue;
 			P2Picture p;
@@ -541,9 +476,8 @@ void P2Pics_Refresh()
 			if ( !P2Pics_ValidName( p.name ) || !ReadVtfInfo( s_LogoDir + "/" + f, v ) || !EngineCanLoad( v ) )
 				continue;
 			// materials for a new spray, or a spray file that changed (frames decide the animation)
-			std::string first = s_PicDir + "/" + p.name + "_s0.vmt";
-			struct stat sv, sm;
-			if ( stat( first.c_str(), &sm ) != 0 || ( stat( ( s_LogoDir + "/" + f ).c_str(), &sv ) == 0 && sv.st_mtime > sm.st_mtime ) )
+			long long made = P2Plat_MTime( s_PicDir + "/" + p.name + "_s0.vmt" );
+			if ( made < 0 || e.mtime > made )
 				WritePictureMaterials( p.name, "vgui/logos/" + stem, v.frames, SPRAY_FPS );
 			p.label = stem;
 			p.width = v.width;
@@ -552,7 +486,6 @@ void P2Pics_Refresh()
 			p.spray = true;
 			sprays.push_back( p );
 		}
-		closedir( dir );
 	}
 	std::sort( pics.begin(), pics.end(), ByName );
 	std::sort( sprays.begin(), sprays.end(), ByName );
@@ -660,7 +593,7 @@ static bool ConvertImage( const std::string &in, const std::string &name, const 
 	file.clear();
 	file.shrink_to_fit();
 	std::string log = tmp + "/maretf.log";
-	unlink( log.c_str() );
+	remove( log.c_str() );
 	if ( !info.known )
 	{
 		// a format we can't read the size of: let MareTF decode it once at full size to find out
@@ -680,7 +613,7 @@ static bool ConvertImage( const std::string &in, const std::string &name, const 
 		info.h = v.height;
 		info.frames = v.frames;
 		info.known = true;
-		unlink( probe.c_str() );
+		remove( probe.c_str() );
 	}
 	Plan plan = MakePlan( info.w, info.h, info.frames );
 
@@ -699,7 +632,7 @@ static bool ConvertImage( const std::string &in, const std::string &name, const 
 		err = "MareTF made something unexpected";
 		return false;
 	}
-	unlink( dec.c_str() );
+	remove( dec.c_str() );
 	size_t frameBytes = (size_t)plan.w * plan.h * 4;
 	size_t offset = v.headerSize;
 	if ( v.lowW && v.lowH && v.lowFormat == 13 )	// a DXT1 thumbnail (we asked for none)
@@ -744,7 +677,7 @@ static bool ConvertImage( const std::string &in, const std::string &name, const 
 		err = "MareTF couldn't compress it";
 		return false;
 	}
-	unlink( padded.c_str() );
+	remove( padded.c_str() );
 	VtfInfo o;
 	long long size = FileSize( out );
 	if ( !ReadVtfInfo( out, o ) || o.width != plan.cw || o.height != plan.ch || o.frames != outFrames || !EngineCanLoad( o ) )
@@ -757,7 +690,7 @@ static bool ConvertImage( const std::string &in, const std::string &name, const 
 		err = "came out bigger than 16 MB";
 		return false;
 	}
-	if ( rename( out.c_str(), ( s_PicDir + "/" + name + ".vtf" ).c_str() ) != 0 )
+	if ( !P2Plat_Replace( out, s_PicDir + "/" + name + ".vtf" ) )
 	{
 		err = "can't write to materials/paintpics";
 		return false;
@@ -771,7 +704,7 @@ static bool ConvertImage( const std::string &in, const std::string &name, const 
 	return true;
 }
 
-static void *AddThread( void *arg )
+static void AddThread( void *arg )
 {
 	AddJob *job = (AddJob *)arg;
 	std::string file = BaseName( job->path ), err;
@@ -806,13 +739,12 @@ static void *AddThread( void *arg )
 
 	if ( ok )
 	{
-		unlink( ( tmp + "/maretf.log" ).c_str() );	// (kept after a failure: what MareTF said)
+		remove( ( tmp + "/maretf.log" ).c_str() );	// (kept after a failure: what MareTF said)
 		SetStatus( P2ADD_DONE, "added " + name, name );
 	}
 	else
 		SetStatus( P2ADD_FAILED, file + ": " + err );
 	delete job;
-	return NULL;
 }
 
 bool P2Pics_Add( const std::string &path )
@@ -828,13 +760,7 @@ bool P2Pics_Add( const std::string &path )
 		s_Status.serial++;
 	}
 	AddJob *job = new AddJob{ path };
-	pthread_t t;
-	pthread_attr_t attr;
-	pthread_attr_init( &attr );
-	pthread_attr_setdetachstate( &attr, PTHREAD_CREATE_DETACHED );
-	int rc = pthread_create( &t, &attr, AddThread, job );
-	pthread_attr_destroy( &attr );
-	if ( rc != 0 )
+	if ( !P2Plat_StartThread( AddThread, job ) )
 	{
 		delete job;
 		SetStatus( P2ADD_FAILED, "couldn't start" );
@@ -863,29 +789,23 @@ static bool DirFirst( const P2DirEntry &a, const P2DirEntry &b )
 {
 	if ( a.dir != b.dir )
 		return a.dir;
-	return strcasecmp( a.name.c_str(), b.name.c_str() ) < 0;
+	return Lower( a.name ) < Lower( b.name );
 }
 
 bool P2Pics_ListDir( const std::string &dir, std::vector<P2DirEntry> &out )
 {
 	out.clear();
-	DIR *d = opendir( dir.c_str() );
-	if ( !d )
+	std::vector<P2PlatEntry> entries;
+	if ( !P2Plat_ListDir( dir, entries ) )
 		return false;
-	while ( dirent *e = readdir( d ) )
-	{
-		if ( e->d_name[0] == '.' )
-			continue;
-		P2DirEntry entry;
-		entry.name = e->d_name;
-		struct stat st;
-		if ( stat( ( dir + "/" + entry.name ).c_str(), &st ) != 0 )
-			continue;
-		entry.dir = S_ISDIR( st.st_mode );
-		if ( entry.dir || ( S_ISREG( st.st_mode ) && P2Pics_IsAddable( entry.name ) ) )
+	for ( const P2PlatEntry &e : entries )
+		if ( e.dir || P2Pics_IsAddable( e.name ) )
+		{
+			P2DirEntry entry;
+			entry.name = e.name;
+			entry.dir = e.dir;
 			out.push_back( entry );
-	}
-	closedir( d );
+		}
 	std::sort( out.begin(), out.end(), DirFirst );
 	return true;
 }

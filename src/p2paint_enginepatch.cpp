@@ -1,28 +1,28 @@
 //=============================================================================
-// p2paint: two engine.so code patches paint needs, made in memory when we load (code that is already
+// p2paint: two engine code patches paint needs, made in memory when we load (code that is already
 // patched in the file is left alone):
 //   decals      R_DecalInit sizes the decal pool from r_decals' DEFAULT string, never its value: always 2048
 //               decals. -> 32768 (slots are 16-bit; nothing walks the pool per frame).
 //   sprayscale  R_DecalCreate forces decals shot as sprays to scale 1.0, so every paint size would be 64 units.
 //               -> keep the material's $decalscale (stock spray materials have none: real sprays don't change).
-// Found in CS:S build 11003710 bin/linux64/engine.so (objdump, 2026-10-27). A game update that moves this code
-// makes the scan miss: the log says NOT FOUND and paint still works, with 2048 decals and one size.
-// Plain C++ / POSIX: tools/patchtest.cpp runs it on a copy of engine.so.
+// Found in CS:S build 11003710: bin/linux64/engine.so (objdump, 2026-10-27) and bin/x64/engine.dll (2026-11-17:
+// R_DecalInit = the function reading the r_decals ConVar built at engine.dll 0x180007c10; the spray branch tests
+// decal flag 0x1000 like the Linux one). A game update that moves this code makes the scan miss: the log says
+// NOT FOUND and paint still works, with 2048 decals and one size.
+// Plain C++: tools/patchtest.cpp runs it on a copy of engine.so / engine.dll.
 //=============================================================================
-#include <link.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <unistd.h>
 #include <vector>
 
 #include "p2paint_enginepatch.h"
+#include "p2paint_platform.h"
 
 struct Edit_t { int at; const char *bytes; };
 struct Patch_t { const char *name, *pattern; Edit_t edits[2]; };	// pattern: hex bytes, "??" = any
 
-static const Patch_t s_Patches[] =
+static const Patch_t s_Linux[] =
 {
 	// mov $0x40,%ebx ... cmp $0x40,%eax; cmovge %eax,%ebx  ->  mov $0x8000,%ebx ... 3-byte nop
 	{ "decals", "bb 40 00 00 00 48 83 ec 08 48 8d 3d ?? ?? ?? ?? e8 ?? ?? ?? ?? 48 89 c7 e8 ?? ?? ?? ?? 44 8b 05 ?? ?? ?? ?? "
@@ -31,6 +31,18 @@ static const Patch_t s_Patches[] =
 	// and $0x10,%dh; je; movl $0,0x50(%r14); movl $1.0,0x44(%r14)  ->  the last store becomes an 8-byte nop
 	{ "sprayscale", "80 e6 10 74 10 41 c7 46 50 00 00 00 00 41 c7 46 44 00 00 80 3f",
 	  { { 13, "0f 1f 84 00 00 00 00 00" }, { -1, NULL } } },
+};
+
+static const Patch_t s_Windows[] =
+{
+	// lea rcx,[r_decals]; call GetDefault; mov rcx,rax; call atoi; mov rdx,[..]; mov ecx,0x40; cmp eax,ecx; mov [..],-1;
+	// cmovl eax,ecx  (= max(64, atoi))  ->  mov ecx,0x8000: max(32768, 2048)
+	{ "decals", "48 8d 0d ?? ?? ?? ?? e8 ?? ?? ?? ?? 48 8b c8 e8 ?? ?? ?? ?? 48 8b 15 ?? ?? ?? ?? b9 40 00 00 00 3b c1 "
+				"c7 05 ?? ?? ?? ?? ff ff ff ff 0f 4c c1",
+	  { { 28, "00 80 00 00" }, { -1, NULL } } },
+	// mov eax,0x1000; test [rdi+0x68],ax; je; mov [rdi+0x50],r15d; mov dword [rdi+0x44],1.0  ->  7-byte nop
+	{ "sprayscale", "b8 00 10 00 00 66 85 47 68 74 0b 44 89 7f 50 c7 47 44 00 00 80 3f",
+	  { { 15, "0f 1f 80 00 00 00 00" }, { -1, NULL } } },
 };
 
 // "bb 40 ?? 00" -> bytes, -1 = any
@@ -63,10 +75,10 @@ static int Count( const unsigned char *base, size_t size, const std::vector<int>
 	return n;
 }
 
-std::string P2Patch_Buffer( unsigned char *base, size_t size, bool ( *write )( unsigned char *dst, const unsigned char *src, size_t n ) )
+std::string P2Patch_Buffer( unsigned char *base, size_t size, bool windows, bool ( *write )( unsigned char *dst, const unsigned char *src, size_t n ) )
 {
 	std::string log;
-	for ( const Patch_t &p : s_Patches )
+	for ( const Patch_t &p : windows ? s_Windows : s_Linux )
 	{
 		std::vector<int> orig = Parse( p.pattern ), done = orig;
 		for ( const Edit_t &e : p.edits )
@@ -99,46 +111,15 @@ std::string P2Patch_Buffer( unsigned char *base, size_t size, bool ( *write )( u
 	return log;
 }
 
-// code pages are read + execute: open them for the store, then close them again
-static bool WriteCode( unsigned char *dst, const unsigned char *src, size_t n )
-{
-	long page = sysconf( _SC_PAGESIZE );
-	unsigned char *start = (unsigned char *)( (uintptr_t)dst & ~( (uintptr_t)page - 1 ) );
-	size_t len = dst + n - start;
-	if ( mprotect( start, len, PROT_READ | PROT_WRITE | PROT_EXEC ) )
-		return false;
-	memcpy( dst, src, n );
-	mprotect( start, len, PROT_READ | PROT_EXEC );
-	return true;
-}
-
-struct Code_t { unsigned char *base; size_t size; };
-
-static int FindEngineCode( struct dl_phdr_info *info, size_t, void *data )
-{
-	static const char suffix[] = "/bin/linux64/engine.so";
-	size_t n = strlen( info->dlpi_name ), s = sizeof( suffix ) - 1;
-	if ( n < s || strcmp( info->dlpi_name + n - s, suffix ) )
-		return 0;
-	for ( int i = 0; i < info->dlpi_phnum; i++ )
-	{
-		const ElfW( Phdr ) &ph = info->dlpi_phdr[i];
-		if ( ph.p_type == PT_LOAD && ( ph.p_flags & PF_X ) )
-		{
-			Code_t *c = (Code_t *)data;
-			c->base = (unsigned char *)( info->dlpi_addr + ph.p_vaddr );
-			c->size = ph.p_memsz;
-			return 1;
-		}
-	}
-	return 0;
-}
-
 std::string P2Patch_Engine()
 {
-	Code_t code = { NULL, 0 };
-	dl_iterate_phdr( FindEngineCode, &code );
-	if ( !code.base )
-		return "engine.so code not found\n";
-	return P2Patch_Buffer( code.base, code.size, WriteCode );
+	unsigned char *base;
+	size_t size;
+	if ( !P2Plat_EngineCode( &base, &size ) )
+		return "engine code not found\n";
+#ifdef _WIN32
+	return P2Patch_Buffer( base, size, true, P2Plat_WriteCode );
+#else
+	return P2Patch_Buffer( base, size, false, P2Plat_WriteCode );
+#endif
 }

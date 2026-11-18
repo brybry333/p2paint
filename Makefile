@@ -52,11 +52,16 @@ $(BUILD)/mathlib.a: $(MATH_OBJ)
 
 # ---- the shader library --------------------------------------------------------------------------------
 SHADER_DEFS := -DSTDSHADER_DX9_DLL_EXPORT -DFAST_MATERIALVAR_ACCESS -DGAME_SHADER_DLL -DDLLNAME=$(OUTNAME)
-DLL_SRC  := $(wildcard src/*.cpp)
+DLL_SRC  := $(filter-out src/p2paint_platform_win.cpp,$(wildcard src/*.cpp))
 DLL_OBJ  := $(DLL_SRC:src/%.cpp=$(BUILD)/dll/%.o) $(BUILD)/dll/memoverride.o
-DLL_INC  := -I$(SDS) -Isrc
+DLL_INC  := -I$(SDS) -Isrc -I$(BUILD)/gen
+GEN      := $(BUILD)/gen/p2paint_files.h
 
-$(BUILD)/dll/%.o: src/%.cpp src/*.h
+# game/ (materials, menu font) embedded: the mod writes its own game files
+$(GEN): tools/embed.py $(shell find game -type f)
+	python3 tools/embed.py game $@
+
+$(BUILD)/dll/%.o: src/%.cpp src/*.h $(GEN)
 	@mkdir -p $(@D); $(CXX) $(CXXFLAGS) $(SHADER_DEFS) $(DLL_INC) -c $< -o $@
 $(BUILD)/dll/memoverride.o: $(SDK)/public/tier0/memoverride.cpp
 	@mkdir -p $(@D); $(CXX) $(CXXFLAGS) $(SHADER_DEFS) -c $< -o $@
@@ -80,10 +85,10 @@ $(SURFTEST): tools/surftest.cpp $(BUILD)/dll/p2paint_bsp.o $(BUILD)/dll/p2paint_
 	    -L$(LIBPUB) -ltier0 -lvstdlib -lm -ldl -lpthread -o $@
 surftest: $(SURFTEST)
 
-# ---- the in-memory engine patches on a file: build/patchtest <engine.so> <out> (prints what it would patch) --
+# ---- the in-memory engine patches on a file: build/patchtest linux|windows <engine.so / engine.dll> <out> --------
 PATCHTEST := $(BUILD)/patchtest
-$(PATCHTEST): tools/patchtest.cpp src/p2paint_enginepatch.cpp src/p2paint_enginepatch.h
-	@mkdir -p $(@D); $(CXX) -O2 -g -Wall -Isrc tools/patchtest.cpp src/p2paint_enginepatch.cpp -o $@
+$(PATCHTEST): tools/patchtest.cpp src/p2paint_enginepatch.cpp src/p2paint_enginepatch.h src/p2paint_platform_linux.cpp
+	@mkdir -p $(@D); $(CXX) -O2 -g -Wall -Isrc tools/patchtest.cpp src/p2paint_enginepatch.cpp src/p2paint_platform_linux.cpp -ldl -lpthread -o $@
 patchtest: $(PATCHTEST)
 
 all: $(OUT) $(LOADER)

@@ -13,7 +13,6 @@
 #include <math.h>
 #include <limits.h>
 #include <stdlib.h>
-#include <sys/stat.h>
 #include <string>
 #include <vector>
 #include <map>
@@ -44,6 +43,7 @@
 #include "p2paint_ui.h"
 #include "p2paint_pics.h"
 #include "p2paint_surfaces.h"
+#include "p2paint_platform.h"
 
 #include "tier0/memdbgon.h"
 
@@ -579,16 +579,15 @@ static int PictureTexture( const std::string &name )
 	return id;
 }
 
-static std::string HomeDir()
-{
-	const char *h = getenv( "HOME" );
-	return h ? h : "/";
-}
+static std::string HomeDir() { return P2Plat_Home(); }
+static bool IsDir( const std::string &path ) { return P2Plat_IsDir( path ); }
 
-static bool IsDir( const std::string &path )
+// the folder above (stops at the root: "/" or a drive "C:/")
+static std::string UpDir( const std::string &dir )
 {
-	struct stat stt;
-	return stat( path.c_str(), &stt ) == 0 && S_ISDIR( stt.st_mode );
+	std::string root = P2Plat_Root( dir );
+	size_t cut = dir.rfind( '/' );
+	return dir.size() <= root.size() || cut == std::string::npos || cut < root.size() ? root : dir.substr( 0, cut );
 }
 
 static std::string Tilde( const std::string &path )
@@ -1277,7 +1276,7 @@ private:
 		int qy = y + S( 22 ), qh = S( 30 );
 		struct { const char *label; std::string path; } places[] =
 		{
-			{ "UP", m_Dir.size() > 1 ? m_Dir.substr( 0, MAX( (size_t)1, m_Dir.rfind( '/' ) ) ) : "/" },
+			{ "UP", UpDir( m_Dir ) },
 			{ "HOME", HomeDir() }, { "PICTURES", HomeDir() + "/Pictures" }, { "DOWNLOADS", HomeDir() + "/Downloads" },
 			{ "DESKTOP", HomeDir() + "/Desktop" }, { "VIDEOS", HomeDir() + "/Videos" },
 		};
@@ -1335,7 +1334,7 @@ private:
 		}
 		if ( !open.empty() )
 		{
-			std::string path = m_Dir == "/" ? "/" + open : m_Dir + "/" + open;
+			std::string path = !m_Dir.empty() && m_Dir.back() == '/' ? m_Dir + open : m_Dir + "/" + open;
 			if ( IsDir( path ) )
 				GoTo( path );
 			else if ( P2Pics_Add( path ) )
@@ -1420,7 +1419,7 @@ static bool s_bBorrowed;
 
 static std::string BorrowFile()
 {
-	return HomeDir() + "/.cache/p2paint/borrowed-binds.txt";
+	return P2Plat_CacheDir() + "/borrowed-binds.txt";
 }
 
 static void SetBind( const char *key, const std::string &cmd )
@@ -1945,13 +1944,13 @@ bool P2UI_Init( P2InterfaceFn pfnInterface, IVEngineClient *pEngine, IMaterialSy
 {
 	s_pEngine = pEngine;
 	s_pMatSys = pMatSys;
-	if ( !s_pSurface )		s_pSurface = (ISurface *)pfnInterface( "/bin/linux64/vguimatsurface.so", VGUI_SURFACE_INTERFACE_VERSION );
-	if ( !s_pPanel )		s_pPanel = (IPanel *)pfnInterface( "/bin/linux64/vgui2.so", VGUI_PANEL_INTERFACE_VERSION );
-	if ( !s_pVGui )			s_pVGui = (IVGui *)pfnInterface( "/bin/linux64/vgui2.so", VGUI_IVGUI_INTERFACE_VERSION );
-	if ( !s_pInput )		s_pInput = (IInput *)pfnInterface( "/bin/linux64/vgui2.so", VGUI_INPUT_INTERFACE_VERSION );
-	if ( !s_pEngineVGui )	s_pEngineVGui = (IEngineVGui *)pfnInterface( "/bin/linux64/engine.so", VENGINE_VGUI_VERSION );
-	if ( !s_pTrace )		s_pTrace = (IEngineTrace *)pfnInterface( "/bin/linux64/engine.so", INTERFACEVERSION_ENGINETRACE_CLIENT );
-	if ( !s_pInputSystem )	s_pInputSystem = (IInputSystem *)pfnInterface( "/bin/linux64/inputsystem.so", INPUTSYSTEM_INTERFACE_VERSION );
+	if ( !s_pSurface )		s_pSurface = (ISurface *)pfnInterface( "vguimatsurface", VGUI_SURFACE_INTERFACE_VERSION );
+	if ( !s_pPanel )		s_pPanel = (IPanel *)pfnInterface( "vgui2", VGUI_PANEL_INTERFACE_VERSION );
+	if ( !s_pVGui )			s_pVGui = (IVGui *)pfnInterface( "vgui2", VGUI_IVGUI_INTERFACE_VERSION );
+	if ( !s_pInput )		s_pInput = (IInput *)pfnInterface( "vgui2", VGUI_INPUT_INTERFACE_VERSION );
+	if ( !s_pEngineVGui )	s_pEngineVGui = (IEngineVGui *)pfnInterface( "engine", VENGINE_VGUI_VERSION );
+	if ( !s_pTrace )		s_pTrace = (IEngineTrace *)pfnInterface( "engine", INTERFACEVERSION_ENGINETRACE_CLIENT );
+	if ( !s_pInputSystem )	s_pInputSystem = (IInputSystem *)pfnInterface( "inputsystem", INPUTSYSTEM_INTERFACE_VERSION );
 	if ( !s_pSurface || !s_pPanel || !s_pVGui || !s_pInput || !s_pEngineVGui )
 		return false;
 	// shipped VMTs (materials/p2paint/), never CreateMaterial with our KeyValues (newer layout in the game:

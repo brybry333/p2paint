@@ -9,7 +9,7 @@
 class IVEngineClient;
 class IMaterialSystem;
 
-typedef void *( *P2InterfaceFn )( const char *moduleSuffix, const char *name );
+typedef void *( *P2InterfaceFn )( const char *module, const char *name );
 
 // after the engine and material system are up (main thread); safe to repeat
 bool P2UI_Init( P2InterfaceFn pfnInterface, IVEngineClient *pEngine, IMaterialSystem *pMatSys );

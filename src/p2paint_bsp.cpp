@@ -1,7 +1,7 @@
 //=============================================================================
 // p2paint: reads the surfaces of the current map from its .bsp (version 20, CS:S); see p2paint_bsp.h
 //=============================================================================
-#include <dirent.h>
+#include "p2paint_platform.h"
 #include <stdio.h>
 
 #include "p2paint_bsp.h"
@@ -101,16 +101,12 @@ namespace
 		if ( ReadFile( path, out ) ) { V_strncpy( found, path, foundLen ); return true; }
 		char customDir[1024];
 		V_snprintf( customDir, sizeof( customDir ), "%s/custom", gameDir );
-		if ( DIR *d = opendir( customDir ) )
+		std::vector<P2PlatEntry> entries;
+		P2Plat_ListDir( customDir, entries );
+		for ( const P2PlatEntry &e : entries )
 		{
-			while ( struct dirent *e = readdir( d ) )
-			{
-				if ( e->d_name[0] == '.' )
-					continue;
-				V_snprintf( path, sizeof( path ), "%s/%s/%s", customDir, e->d_name, level );
-				if ( ReadFile( path, out ) ) { closedir( d ); V_strncpy( found, path, foundLen ); return true; }
-			}
-			closedir( d );
+			V_snprintf( path, sizeof( path ), "%s/%s/%s", customDir, e.name.c_str(), level );
+			if ( ReadFile( path, out ) ) { V_strncpy( found, path, foundLen ); return true; }
 		}
 		return false;
 	}
