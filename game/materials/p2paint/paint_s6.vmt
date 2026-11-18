@@ -1,0 +1,11 @@
+// paint size 6: the classic paint decal, white, coloured per decal (PlayerDecalShoot colour)
+// $decalscale = 2x the plugin's: decals drawn as sprays are sized as if 64 px wide (128 px texture / 2)
+"UnlitGeneric"
+{
+	"$basetexture" "decals/paint/paint_decal"
+	"$decal" 1
+	"$decalscale" 1.80
+	"$translucent" 1
+	"$vertexcolor" 1
+	"$vertexalpha" 1
+}

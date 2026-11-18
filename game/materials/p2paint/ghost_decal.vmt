@@ -1,0 +1,8 @@
+"UnlitGeneric"
+{
+	"$basetexture" "decals/paint/paint_decal"
+	"$vertexcolor" 1
+	"$vertexalpha" 1
+	"$translucent" 1
+	"$nocull" 1
+}

@@ -1,0 +1,6 @@
+third_party/
+tools/vkfxc
+__pycache__/
+build/
+install/
+compile_flags.txt
